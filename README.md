@@ -175,9 +175,13 @@ job for tests. The key is never logged (URLs are redacted in logs).
 
 Deployed on Vercel (free Hobby plan, project
 `zkverify-gatekeeper-agent`, account buahrasa01@gmail.com).
+Public URL: https://zkverify-gatekeeper-agent-buahrasa01.vercel.app
+(the bare `zkverify-gatekeeper-agent.vercel.app` belongs to someone
+else — do NOT register that one).
 Serverless adapter: `api/agent.ts` (thin wrapper around
-`src/agent.ts`) + `api/healthz.ts`, `vercel.json` routes `/agent`
-and `/healthz` to them.
+`src/agent.ts`) + `api/healthz.ts`. `vercel.json` uses legacy
+`builds` + `routes` (see "Packaging" — zero-config and `rewrites`
+do NOT work for this repo, proven across 6 deployments).
 
 - **10 s Hobby function limit vs the platform's 60 s deadline.**
   The handler budget is capped at 8 s (`HANDLER_BUDGET_MS`, min(env,
@@ -200,12 +204,47 @@ and `/healthz` to them.
   single esbuild ESM bundle: that breaks at import time
   (`Dynamic require of "url" is not supported`). The `circuits/`
   artifacts (~2 MB: wasm 1.76 MB + zkey 310 KB + vk.json 5 KB)
-  ship via `vercel.json` `includeFiles` (they are read from disk at
-  runtime, never traced as imports). `CIRCUITS_DIR` resolves to
-  `<project-root>/circuits` on Vercel. The seen-store lives at
-  `/tmp/seen-proof-tx.json` there (the function filesystem is
-  read-only except `/tmp`); reuse protection is per-instance plus
-  that file.
+  ship via `includeFiles` in each build entry's `config` (they are
+  read from disk at runtime, never traced as imports).
+  `CIRCUITS_DIR` resolves to `<project-root>/circuits` on Vercel.
+  The seen-store lives at `/tmp/seen-proof-tx.json` there (the
+  function filesystem is read-only except `/tmp`); reuse
+  protection is per-instance plus that file.
+  - **Zero-config does NOT work for this repo.** The "node"
+    framework's `@vercel/backends` builder detects `src/server.ts`
+    (well-known filename list: app/index/server/main at root or
+    in `src/`) as a root entrypoint and builds ONE server lambda,
+    ignoring `api/` entirely; that lambda exits(1) without the
+    HMAC secret, so every request 500s. Removing `main` from
+    `package.json` does not help — the filename match comes first.
+    `framework: null` is worse: static-only mode, no functions at
+    all (`STATIC_BUILD_NO_OUT_DIR`).
+  - **Legacy `builds` is the working path.** `vercel.json`
+    declares `builds` for `api/agent.ts` + `api/healthz.ts` with
+    `@vercel/node` (includeFiles/maxDuration live in each build
+    entry's `config` — the top-level `functions` key CANNOT be
+    combined with `builds`). In builds mode the functions are
+    served at their LITERAL src paths, extension included
+    (`/api/agent.ts`, `/api/healthz.ts`); the `rewrites` key is
+    ignored there, so clean paths need legacy `routes` mapping
+    `/agent` → `/api/agent.ts` and `/healthz` →
+    `/api/healthz.ts` (verified live).
+  - **Deployment Protection (SSO) must stay OFF.** New projects
+    default to `ssoProtection: all_except_custom_domains`, which
+    302-redirects every unauthenticated request to a Vercel login
+    page — the ZkVerify platform cannot log in. It was disabled
+    via the API (`PATCH /v9/projects/{id} {"ssoProtection": null}`).
+- **Kurier (proven live 17 Nov).** The submit shape in
+  `src/kurier.ts` was verified with a real Groth16 proof:
+  HTTP 200, jobId returned, optimisticVerify "success" — do not
+  change it. The job-STATUS endpoint is unreliable: it answers
+  401 "Unauthorized or disabled API key" even for a real jobId
+  with a proven-valid key. Never use it as an auth probe or a
+  polling source; the agent already catches a Kurier failure and
+  falls back to the incoming `proof_tx` while still answering
+  with the local proof. A "kurier submission failed, falling back
+  to incoming proof_tx" warning in the logs is expected
+  behaviour, not a deploy failure.
 - **Env vars — set in the Vercel dashboard** (Project → Settings →
   Environment Variables; Production). Never in the repo (`.env` is
   gitignored; `.env.example` ships blank values):
@@ -218,6 +257,15 @@ and `/healthz` to them.
   | `SEEN_STORE_PATH` | No | Defaults to `/tmp/seen-proof-tx.json` on Vercel. |
   | `HANDLER_BUDGET_MS` | No | Defaults to 8000; capped at 8500 here regardless. |
 
+- **Cold start (measured on Vercel, secret unset).** `GET /healthz`
+  1.12 s cold / 1.13 s warm; `POST /agent` (401 unconfigured
+  branch, short-circuits before proving) 1.48 s cold / 1.11 s
+  warm. One outlier: the first-ever invocation of an earlier
+  deployment took 10.05 s cold. The first REAL `/agent` call
+  (secret set, local Groth16 proof) has NOT been measured on
+  Vercel yet — local numbers say proof ~1 s, so it should land
+  well inside 10 s, but treat it as unverified until preflight
+  runs.
 - The endpoint must be a public HTTPS URL registered with its full
   handler path (`/agent`, not the root).
 - After deploy: register the endpoint in the ZkVerify dashboard,
@@ -231,7 +279,8 @@ and `/healthz` to them.
 api/agent.ts            Vercel serverless adapter (HMAC, budget cap,
                         Kurier fire-and-forget, 401 until configured)
 api/healthz.ts          Vercel GET /healthz (signed when configured)
-vercel.json             rewrites /agent + /healthz, includeFiles circuits/**
+vercel.json             legacy builds (api/*.ts) + routes /agent + /healthz
+                        (zero-config + rewrites do NOT work here — see above)
 circuits/                 gatekeeper.wasm, gatekeeper_final.zkey, gatekeeper.vk.json
 src/server.ts             HTTP server, routing, raw-body capture, startup checks
 src/agent.ts              /agent orchestration (HMAC -> decide -> prove -> Kurier -> sign)
