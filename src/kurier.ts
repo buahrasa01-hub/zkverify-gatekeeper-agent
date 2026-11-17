@@ -91,9 +91,10 @@ function sleep(ms: number): Promise<void> {
 export async function submitProofToKurier(
   proof: Groth16Proof,
   publicSignals: string[],
-  deadlineMs: number
+  deadlineMs: number,
+  modeOverride?: KurierMode
 ): Promise<KurierResult> {
-  const mode = resolveKurierMode();
+  const mode = modeOverride ?? resolveKurierMode();
   if (mode === "mock") {
     await sleep(50);
     return {

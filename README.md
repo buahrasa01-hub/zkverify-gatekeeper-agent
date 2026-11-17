@@ -173,22 +173,53 @@ job for tests. The key is never logged (URLs are redacted in logs).
 
 ## Deploy notes (Vercel serverless)
 
+Deployed on Vercel (free Hobby plan, project
+`zkverify-gatekeeper-agent`, account buahrasa01@gmail.com).
+Serverless adapter: `api/agent.ts` (thin wrapper around
+`src/agent.ts`) + `api/healthz.ts`, `vercel.json` routes `/agent`
+and `/healthz` to them.
+
+- **10 s Hobby function limit vs the platform's 60 s deadline.**
+  The handler budget is capped at 8 s (`HANDLER_BUDGET_MS`, min(env,
+  8500 ms)). Local proof generation is ~0.4 s warm / ~1.2 s cold
+  (fresh process, first call), preflight ~3 ms — far inside the
+  budget. Kurier NEVER blocks the response: the in-path call is
+  forced off and the proof is submitted fire-and-forget as a
+  floating promise after the response body is built (best effort;
+  `proof_tx` is optional and the platform re-verifies the local
+  proof offline). No `waitUntil()`: a Kurier job rarely reaches
+  Finalized inside the 10 s budget anyway.
+- **No secrets until configured.** With no
+  `AGENT_GAMES_HMAC_SECRET` the function still starts and answers
+  `/healthz`, while `POST /agent` returns 401 `agent not
+  configured`. No placeholder is ever accepted as real.
+- **Packaging (important).** Vercel's Node runtime does NOT bundle
+  with esbuild — it traces files with nft and ships them as-is, so
+  `snarkjs` (and its `web-worker` dependency, which uses dynamic
+  `require("url")`) loads natively. Do NOT "optimise" this into a
+  single esbuild ESM bundle: that breaks at import time
+  (`Dynamic require of "url" is not supported`). The `circuits/`
+  artifacts (~2 MB: wasm 1.76 MB + zkey 310 KB + vk.json 5 KB)
+  ship via `vercel.json` `includeFiles` (they are read from disk at
+  runtime, never traced as imports). `CIRCUITS_DIR` resolves to
+  `<project-root>/circuits` on Vercel. The seen-store lives at
+  `/tmp/seen-proof-tx.json` there (the function filesystem is
+  read-only except `/tmp`); reuse protection is per-instance plus
+  that file.
+- **Env vars — set in the Vercel dashboard** (Project → Settings →
+  Environment Variables; Production). Never in the repo (`.env` is
+  gitignored; `.env.example` ships blank values):
+
+  | Variable | Required | Value source |
+  |---|---|---|
+  | `AGENT_GAMES_HMAC_SECRET` | Yes | ZkVerify dashboard → Rotate Secret (one-time plaintext). Without it `/agent` 401s. |
+  | `KURIER_API_KEY` | No | https://kurier.xyz mainnet dashboard (free signup). Unset = no Kurier submission; the agent still answers with its local proof. |
+  | `KURIER_MODE` | No | `off` disables even the background Kurier submission. Unset = background submission runs when a key is set. |
+  | `SEEN_STORE_PATH` | No | Defaults to `/tmp/seen-proof-tx.json` on Vercel. |
+  | `HANDLER_BUDGET_MS` | No | Defaults to 8000; capped at 8500 here regardless. |
+
 - The endpoint must be a public HTTPS URL registered with its full
   handler path (`/agent`, not the root).
-- The `circuits/` artifacts (~2 MB: wasm 1.76 MB + zkey 310 KB +
-  vk.json 5 KB) must ship with the deployment; snarkjs needs them
-  on the local filesystem at runtime.
-- Proof generation is CPU-heavy (~1 s locally) but far inside the
-  60 s platform deadline; the binding constraint is the serverless
-  function's own timeout — use a plan/runtime whose function timeout
-  exceeds ~30 s, or the 50 s internal budget is unreachable.
-- `snarkjs` leaves worker threads alive: the process does not exit
-  on its own after `fullProve` (verified). That is harmless for a
-  long-lived server but the test harness calls `process.exit()`
-  explicitly.
-- Secrets (`AGENT_GAMES_HMAC_SECRET`, `KURIER_API_KEY`) come from
-  the deployment environment only — never from the repo. `.env` is
-  gitignored; `.env.example` ships blank values.
 - After deploy: register the endpoint in the ZkVerify dashboard,
   Rotate Secret, set it as `AGENT_GAMES_HMAC_SECRET`, restart, run
   preflight (must pass), then at least one practice task before a
@@ -197,6 +228,10 @@ job for tests. The key is never logged (URLs are redacted in logs).
 ## File layout
 
 ```
+api/agent.ts            Vercel serverless adapter (HMAC, budget cap,
+                        Kurier fire-and-forget, 401 until configured)
+api/healthz.ts          Vercel GET /healthz (signed when configured)
+vercel.json             rewrites /agent + /healthz, includeFiles circuits/**
 circuits/                 gatekeeper.wasm, gatekeeper_final.zkey, gatekeeper.vk.json
 src/server.ts             HTTP server, routing, raw-body capture, startup checks
 src/agent.ts              /agent orchestration (HMAC -> decide -> prove -> Kurier -> sign)

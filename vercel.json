@@ -1,0 +1,1 @@
+{"$schema":"https://openapi.vercel.sh/vercel.json","buildCommand":"npm run build","functions":{"api/agent.ts":{"includeFiles":"circuits/**","maxDuration":10},"api/healthz.ts":{"maxDuration":10}},"rewrites":[{"destination":"/api/agent","source":"/agent"},{"destination":"/api/healthz","source":"/healthz"}]}
